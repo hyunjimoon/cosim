@@ -143,3 +143,175 @@ def gaussian_euclidean(
         return turning_at_left | turning_at_right
 
     return momentum_generator, kinetic_energy, is_turning
+
+def riemannian(
+    inverse_mass_matrix: jnp.DeviceArray,
+) -> Tuple[Callable, EuclideanKineticEnergy, Callable]:
+    r"""Hamiltonian dynamic on euclidean manifold with normally-distributed momentum.
+
+    The gaussian euclidean metric is a euclidean metric further characterized
+    by setting the conditional probability density :math:`\pi(momentum|position)`
+    to follow a standard gaussian distribution. A Newtonian hamiltonian
+    dynamics is assumed.
+
+    Arguments
+    ---------
+    inverse_mass_matrix
+        One or two-dimensional array corresponding respectively to a diagonal
+        or dense mass matrix. The inverse mass matrix is multiplied to a
+        flattened version of the Pytree in which the chain position is stored
+        (the current value of the random variables). The order of the variables
+        should thus match JAX's tree flattening order, and more specifically
+        that of `ravel_pytree`.
+        In particular, JAX sorts dictionaries by key when flattening them. The
+        value of each variables will appear in the flattened Pytree following
+        the order given by `sort(keys)`.
+
+    Returns
+    -------
+    momentum_generator
+        A function that generates a value for the momentum at random.
+    kinetic_energy
+        A function that returns the kinetic energy given the momentum.
+    is_turning
+        A function that determines whether a trajectory is turning back on
+        itself given the values of the momentum along the trajectory.
+
+    References
+    ----------
+    .. [1]: Betancourt, Michael. "A general metric for Riemannian manifold
+            Hamiltonian Monte Carlo." International Conference on Geometric Science of
+            Information. Springer, Berlin, Heidelberg, 2013.
+
+    """
+    ndim = jnp.ndim(inverse_mass_matrix)
+    shape = jnp.shape(inverse_mass_matrix)[:1]
+
+    if ndim == 1:  # diagonal mass matrix
+        mass_matrix_sqrt = jnp.sqrt(jnp.reciprocal(inverse_mass_matrix))
+        dot, matmul = jnp.multiply, jnp.multiply
+
+    elif ndim == 2:
+        tril_inv = jscipy.linalg.cholesky(inverse_mass_matrix)
+        identity = jnp.identity(shape[0])
+        mass_matrix_sqrt = jscipy.linalg.solve_triangular(
+            tril_inv, identity, lower=True
+        )
+        dot, matmul = jnp.dot, jnp.matmul
+
+    else:
+        raise ValueError(
+            "The mass matrix has the wrong number of dimensions:"
+            f" expected 1 or 2, got {jnp.ndim(inverse_mass_matrix)}."
+        )
+
+    def momentum_generator(rng_key: jnp.ndarray, position: PyTree, unravel: bool=True) -> PyTree:
+        _, unravel_fn = ravel_pytree(position)
+        standard_normal_sample = jax.random.normal(rng_key, shape)
+        momentum = dot(mass_matrix_sqrt, standard_normal_sample)
+        if unravel:
+            momentum_unravel = unravel_fn(momentum)
+            return momentum_unravel
+        else:
+            return momentum
+
+    def kinetic_energy(momentum: PyTree) -> float:
+        momentum, _ = ravel_pytree(momentum)
+        momentum = jnp.array(momentum)
+        velocity = matmul(inverse_mass_matrix, momentum)
+        kinetic_energy_val = 0.5 * jnp.dot(velocity, momentum)
+        return kinetic_energy_val
+
+    def is_turning(
+        momentum_left: PyTree, momentum_right: PyTree, momentum_sum: PyTree
+    ) -> bool:
+        """Generalized U-turn criterion.
+
+        Parameters
+        ----------
+        momentum_left
+            Momentum of the leftmost point of the trajectory.
+        momentum_right
+            Momentum of the rightmost point of the trajectory.
+        momentum_sum
+            Sum of the momenta along the trajectory.
+
+        .. [1]: Betancourt, Michael J. "Generalizing the no-U-turn sampler to Riemannian manifolds." arXiv preprint arXiv:1304.1920 (2013).
+        .. [2]: "NUTS misses U-turn, runs in cicles until max depth", Stan Discourse Forum
+                https://discourse.mc-stan.org/t/nuts-misses-u-turns-runs-in-circles-until-max-treedepth/9727/46
+        """
+        m_left, _ = ravel_pytree(momentum_left)
+        m_right, _ = ravel_pytree(momentum_right)
+        m_sum, _ = ravel_pytree(momentum_sum)
+
+        velocity_left = matmul(inverse_mass_matrix, m_left)
+        velocity_right = matmul(inverse_mass_matrix, m_right)
+
+        # rho = m_sum
+        rho = m_sum - (m_right + m_left) / 2
+        turning_at_left = jnp.dot(velocity_left, rho) <= 0
+        turning_at_right = jnp.dot(velocity_right, rho) <= 0
+        return turning_at_left | turning_at_right
+
+    return momentum_generator, kinetic_energy, is_turning
+
+def rm_hamiltonian(params, momentum, log_prob_func, jitter, normalizing_const, softabs_const=1e6, sampler=Sampler.HMC, integrator=Integrator.EXPLICIT, metric=Metric.HESSIAN):
+    """Compute the Hamiltonian (non-separable) for RMHMC.
+
+    Parameters
+    ----------
+    params : torch.tensor
+        Flat vector of model parameters: shape (D,), where D is the dimensionality of the parameters.
+    momentum : torch.tensor
+        Flat vector of momentum, corresponding to the parameters: shape (D,), where D is the dimensionality of the parameters.
+    log_prob_func : function
+        A log_prob_func must take a 1-d vector of length equal to the number of parameters that are being sampled.
+    jitter : float
+        Jitter is often added to the diagonal to the metric tensor to ensure it can be inverted.
+        `jitter` is a float corresponding to scale of random draws from a uniform distribution.
+    normalizing_const : float
+        This constant is currently set to 1.0 and might be removed in future versions as it plays no immediate role.
+    softabs_const : float
+        Controls the "filtering" strength of the negative eigenvalues. Large values -> absolute value. See Betancourt 2013.
+    sampler : Sampler
+        Sets the type of sampler that is being used for HMC: Choice {Sampler.HMC, Sampler.RMHMC, Sampler.HMC_NUTS}.
+    integrator : Integrator
+        Sets the type of integrator to be used for the leapfrog: Choice {Integrator.EXPLICIT, Integrator.IMPLICIT, Integrator.SPLITTING,
+        Integrator.SPLITTING_RAND, Integrator.SPLITTING_KMID}.
+    metric : Metric
+        Determines the metric to be used for RMHMC. E.g. default is the Hessian hamiltorch.Metric.HESSIAN.
+
+    Returns
+    -------
+    torch.tensor
+        Returns the value of the Hamiltonian: shape (1,).
+
+    """
+
+    log_prob = log_prob_func(params)
+    ndim = params.nelement()
+    pi_term = ndim * torch.log(2.*torch.tensor(pi))
+
+    fish, abs_eigenvalues = fisher(params, log_prob_func, jitter=jitter, normalizing_const=normalizing_const, softabs_const=softabs_const, metric=metric)
+
+    if abs_eigenvalues is not None:
+        if util.has_nan_or_inf(fish) or util.has_nan_or_inf(abs_eigenvalues):
+            print('Invalid Fisher: {} , abs_eigenvalues: {}, params: {}'.format(fish, abs_eigenvalues, params))
+            raise util.LogProbError()
+    else:
+        if util.has_nan_or_inf(fish):
+            print('Invalid Fisher: {}, params: {}'.format(fish, params))
+            raise util.LogProbError()
+
+    if metric == Metric.SOFTABS:
+        log_det_abs = abs_eigenvalues.log().sum()
+    else:
+        log_det_abs = torch.slogdet(fish)[1]
+    fish_inverse_momentum = cholesky_inverse(fish, momentum)
+    quadratic_term = torch.matmul(momentum.view(1, -1), fish_inverse_momentum)
+    hamiltonian = - log_prob + 0.5 * pi_term + 0.5 * log_det_abs + 0.5 * quadratic_term
+    if util.has_nan_or_inf(hamiltonian):
+        print('Invalid hamiltonian, log_prob: {}, params: {}, momentum: {}'.format(log_prob, params, momentum))
+        raise util.LogProbError()
+
+    return hamiltonian

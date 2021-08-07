@@ -43,6 +43,7 @@ def kernel(
         *,
         integrator: Callable = integrators.velocity_verlet,
         divergence_threshold: int = 1000,
+        metric_type: gaussian_euclidean,
 ):
     """Build a coupled HMC kernel.
 
@@ -60,9 +61,14 @@ def kernel(
     information about the transition.
 
     """
-    momentum_generator, kinetic_energy_fn, _ = metrics.gaussian_euclidean(
-        inverse_mass_matrix
-    )
+    if metric_type == gaussian_euclidean:
+      momentum_generator, kinetic_energy_fn, _ = metrics.gaussian_euclidean(
+          inverse_mass_matrix
+      )
+    elif:
+      momentum_generator, kinetic_energy_fn, _ = metrics.riemannian(
+          inverse_mass_matrix
+      )      
     symplectic_integrator = integrator(potential_fn, kinetic_energy_fn)
     proposal_generator = coupled_hmc_proposal(
         symplectic_integrator,
@@ -114,7 +120,6 @@ def kernel(
         return proposal, info
 
     return one_step
-
 
 def coupled_hmc_proposal(
         integrator: Callable,
