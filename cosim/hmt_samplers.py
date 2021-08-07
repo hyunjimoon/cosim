@@ -29,7 +29,7 @@ class Metric(Enum):
     HESSIAN = 1
     SOFTABS = 2
     JACOBIAN_DIAG = 3
-    HYPERELLIP = 4
+    HYPERBOLIC = 4
 
 def collect_gradients(log_prob, params):
     """Returns the parameters and the corresponding gradients (params.grad).
@@ -96,7 +96,7 @@ def fisher(params, log_prob_func=None, jitter=None, normalizing_const=1., softab
         jac = torch.cat([j.flatten() for j in jac])
         # util.flatten(jac).view(1,-1)
         fish = torch.matmul(jac.view(-1, 1), jac.view(1, -1)).diag().diag()  # / normalizing_const #.diag().diag() / normalizing_const
-    elif metric == Metric.HYPERELLIP:
+    elif metric == Metric.HYPERBOLIC:
         hess = util.hessian(log_prob.float(), params, create_graph=True, return_inputs=False)
         fish = - hess * (1 - (tanh(torch.sqrt(torch.sum(params * params))))**2)**2  # / normalizing_const
         print("hess", hess, '#####fish', fish, '#####param', params)
@@ -109,7 +109,7 @@ def fisher(params, log_prob_func=None, jitter=None, normalizing_const=1., softab
     if jitter is not None:
         params_n_elements = fish.shape[0]
         fish += (torch.eye(params_n_elements) * torch.rand(params_n_elements) * jitter).to(fish.device)
-    if (metric is Metric.HESSIAN) or (metric is Metric.JACOBIAN_DIAG) or (metric is Metric.HYPERELLIP):
+    if (metric is Metric.HESSIAN) or (metric is Metric.JACOBIAN_DIAG) or (metric is Metric.HYPERBOLIC):
         return fish, None
     elif metric == Metric.SOFTABS:
         eigenvalues, eigenvectors = torch.symeig(fish, eigenvectors=True)
